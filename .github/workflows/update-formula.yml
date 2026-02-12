@@ -1,0 +1,102 @@
+name: Update Formula
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  update:
+    name: Update gcpx formula
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update formula
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          # Strip leading 'v' for the formula version field
+          CLEAN_VERSION="${VERSION#v}"
+
+          REPO="andres-pcg/gcpx"
+          BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+
+          echo "Updating formula to version ${CLEAN_VERSION}..."
+
+          # Download binaries and compute sha256
+          declare -A ASSETS=(
+            ["macos-aarch64"]="gcpx-macos-aarch64"
+            ["macos-x86_64"]="gcpx-macos-x86_64"
+            ["linux-aarch64"]="gcpx-linux-aarch64"
+            ["linux-x86_64"]="gcpx-linux-x86_64"
+          )
+
+          declare -A SHAS
+
+          for key in "${!ASSETS[@]}"; do
+            asset="${ASSETS[$key]}"
+            url="${BASE_URL}/${asset}"
+            echo "Downloading ${url}..."
+            sha=$(curl -sL "${url}" | shasum -a 256 | awk '{print $1}')
+            SHAS[$key]="$sha"
+            echo "  ${key}: ${sha}"
+          done
+
+          # Update the formula file
+          FORMULA="Formula/gcpx.rb"
+
+          # Update version
+          sed -i "s/version \".*\"/version \"${CLEAN_VERSION}\"/" "$FORMULA"
+
+          # Update sha256 values using a Python script for reliability
+          python3 << PYEOF
+          import re
+
+          with open("${FORMULA}", "r") as f:
+              content = f.read()
+
+          # Map of URL patterns to their sha256 values
+          replacements = {
+              "gcpx-macos-aarch64": "${SHAS[macos-aarch64]}",
+              "gcpx-macos-x86_64": "${SHAS[macos-x86_64]}",
+              "gcpx-linux-aarch64": "${SHAS[linux-aarch64]}",
+              "gcpx-linux-x86_64": "${SHAS[linux-x86_64]}",
+          }
+
+          # For each URL line, find the next sha256 line and replace it
+          lines = content.split('\n')
+          result = []
+          next_sha = None
+
+          for line in lines:
+              # Check if this line has a URL we care about
+              for asset, sha in replacements.items():
+                  if f'url "' in line and asset in line:
+                      next_sha = sha
+                      break
+
+              # If this is a sha256 line and we have a pending replacement
+              if next_sha and 'sha256 "' in line:
+                  line = re.sub(r'sha256 ".*"', f'sha256 "{next_sha}"', line)
+                  next_sha = None
+
+              result.append(line)
+
+          with open("${FORMULA}", "w") as f:
+              f.write('\n'.join(result))
+          PYEOF
+
+          echo "Formula updated successfully."
+          cat "$FORMULA"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/gcpx.rb
+          git commit -m "Update gcpx to ${{ github.event.inputs.version }}"
+          git push
